@@ -15,6 +15,22 @@ class OpponentModel:
             i: IssueEstimator(v) for i, v in domain.getIssuesValues().items()
         }
 
+        # Track past predicted utilities for concession detection
+        self.predicted_utilities_window = []  # sliding window of past utilities
+        self.window_size = 5  # how many previous utilities to consider
+
+    def is_opponent_conceding(self, epsilon: float = 0.05) -> bool:
+        """
+        Checks if the opponent is conceding by comparing the predicted utility
+        of their earlier and more recent offers. Returns True if the predicted
+        utility is decreasing (meaning they are conceding).
+        """
+        if len(self.predicted_utilities_window) < 2:
+            return False  # Not enough data to decide
+
+        # Compare first and last utility in sliding window
+        return self.predicted_utilities_window[-1] < self.predicted_utilities_window[0] - epsilon
+
     def update(self, bid: Bid):
         # keep track of all bids received
         self.offers.append(bid)
@@ -53,6 +69,11 @@ class OpponentModel:
         predicted_utility = sum(
             [iw * vu for iw, vu in zip(issue_weights, value_utilities)]
         )
+
+        # track recent predicted utilities for opponent concession analysis
+        self.predicted_utilities_window.append(predicted_utility)
+        if len(self.predicted_utilities_window) > self.window_size:
+            self.predicted_utilities_window.pop(0)
 
         return predicted_utility
 
@@ -112,7 +133,8 @@ class IssueEstimator:
         if value in self.value_trackers:
             return self.value_trackers[value].utility
 
-        return 0
+        # Use smoothing: assign equal utility to unknown values
+        return 1 / self.num_values  # Previously: return 0
 
 
 class ValueEstimator:

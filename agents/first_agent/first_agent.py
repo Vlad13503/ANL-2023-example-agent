@@ -240,6 +240,11 @@ class FirstAgent(DefaultParty):
             predicted = self.opponent_model.get_predicted_utility(bid)
             if utility >= 0.65 and abs(utility - predicted) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
                 return True
+
+            # 💡reward the opponent if they are conceding
+            if self.opponent_model.is_opponent_conceding() and utility > 0.7:
+                return True
+
         # return all(conditions)
         return utility > dynamic_threshold
 
@@ -294,6 +299,9 @@ class FirstAgent(DefaultParty):
         Returns:
             float: score
         """
+        if self.opponent_model.is_opponent_conceding():
+            alpha = 0.7  # be nicer (lower self-interest)
+
         progress = self.progress.get(time() * 1000)
 
         our_utility = float(self.profile.getUtility(bid))
