@@ -1,7 +1,7 @@
 import logging
 import json
 from os import path
-from random import randint
+from random import choice
 from time import time
 from typing import cast
 
@@ -58,6 +58,7 @@ class FirstAgent(DefaultParty):
         self.settings: Settings = None
         self.storage_dir: str = None
         self.opponent_summary: OpponentSummary = None
+        self.sorted_bids: list[Bid] = []
 
         self.last_received_bid: Bid = None
         self.opponent_model: OpponentModel = None
@@ -220,31 +221,65 @@ class FirstAgent(DefaultParty):
 
         # progress of the negotiation session between 0 and 1 (1 is deadline)
         progress = self.progress.get(time() * 1000)
+        utility = self.profile.getUtility(bid)
+
+        # More flexible as time progresses (with cap at 0.4)
+        dynamic_threshold = max(0.9 - 0.8 * (progress ** 4), 0.4)
 
         # very basic approach that accepts if the offer is valued above 0.7 and
         # 95% of the time towards the deadline has passed
-        conditions = [
-            self.profile.getUtility(bid) > 0.8,
-            progress > 0.95,
-        ]
-        return all(conditions)
+        # conditions = [
+        #     self.profile.getUtility(bid) > 0.8,
+        #     progress > 0.95,
+        # ]
+
+        if utility >= 0.85: # Accept all very good offers
+            return True
+
+        if self.opponent_model is not None:
+            predicted = self.opponent_model.get_predicted_utility(bid)
+            if utility >= 0.65 and abs(utility - predicted) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
+                return True
+        # return all(conditions)
+        return utility > dynamic_threshold
 
     def find_bid(self) -> Bid:
-        # compose a list of all possible bids
-        domain = self.profile.getDomain()
-        all_bids = AllBidsList(domain)
+        # compose a list of all possible bids and sort descending on utility
+        if not self.sorted_bids:
+            all_bids = AllBidsList(self.domain)
+            self.sorted_bids = sorted(
+                [all_bids.get(i) for i in range(all_bids.size())],
+                key=lambda crt_bid: self.profile.getUtility(crt_bid),
+                reverse=True
+            )
 
-        best_bid_score = 0.0
-        best_bid = None
+        # Decrease minimum acceptable utility value over time
+        progress = self.progress.get(time() * 1000)
+        min_util = 0.7 - 0.6 * (progress ** 4)
+        opponent_importance = progress ** 2  # Increase opponent influence as time progresses
 
-        # take 500 attempts to find a bid according to a heuristic score
-        for _ in range(500):
-            bid = all_bids.get(randint(0, all_bids.size() - 1))
-            bid_score = self.score_bid(bid)
-            if bid_score > best_bid_score:
-                best_bid_score, best_bid = bid_score, bid
+        top_n = max(5, int(len(self.sorted_bids) * 0.01))
 
-        return best_bid
+        top_bids = []
+        for bid in self.sorted_bids:
+            util = self.profile.getUtility(bid)
+            if util < min_util:
+                break
+
+            score = self.score_bid(bid, 1 - opponent_importance)
+            top_bids.append((bid, score))
+
+            if len(top_bids) >= top_n:
+                break
+
+        # If we have at least one top-scoring bid, pick one randomly among them
+        if top_bids:
+            return choice([bid for bid, _ in top_bids])
+
+        # Fallback: return the best possible bid below min_util
+        for bid in self.sorted_bids:
+            if self.profile.getUtility(bid) < min_util:
+                return bid
 
     def score_bid(self, bid: Bid, alpha: float = 0.95, eps: float = 0.1) -> float:
         """Calculate heuristic score for a bid
