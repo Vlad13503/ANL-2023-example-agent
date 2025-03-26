@@ -281,6 +281,8 @@ class FirstAgent(DefaultParty):
             if self.profile.getUtility(bid) < min_util:
                 return bid
 
+        return self.sorted_bids[-1] # Return worst bid (never reachable)
+
     def score_bid(self, bid: Bid, alpha: float = 0.95, eps: float = 0.1) -> float:
         """Calculate heuristic score for a bid
 
