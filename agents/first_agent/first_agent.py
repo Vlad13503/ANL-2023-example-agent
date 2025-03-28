@@ -1,5 +1,6 @@
 import logging
 import json
+from decimal import Decimal
 from os import path
 from random import choice
 from time import time
@@ -37,8 +38,6 @@ class SessionData(TypedDict):
     issue_weights: dict[str, float]
     value_counts: dict[str, dict[str, int]]
 
-class OpponentSummary(TypedDict):
-    sessions: list[SessionData]
 
 class FirstAgent(DefaultParty):
     """
@@ -57,7 +56,7 @@ class FirstAgent(DefaultParty):
         self.other: str = None
         self.settings: Settings = None
         self.storage_dir: str = None
-        self.opponent_summary: OpponentSummary = None
+        self.opponent_summary: dict[str, list[SessionData]] = None
         self.sorted_bids: list[Bid] = []
 
         self.last_received_bid: Bid = None
@@ -189,13 +188,16 @@ class FirstAgent(DefaultParty):
         self.send_action(action)
 
     def load_data(self):
-        if path.exists(f"{self.storage_dir}/{self.other}.json"):
-            with open(f"{self.storage_dir}/{self.other}.json") as f:
+        filepath = f"{self.storage_dir}/{self.other}.json"
+        if path.exists(filepath):
+            with open(filepath) as f:
                 self.opponent_summary = json.load(f)
         else:
-            self.opponent_summary = {
-                "sessions": []
-            }
+            self.opponent_summary = {}
+
+        domain_name = self.domain.getName()
+        if domain_name not in self.opponent_summary:
+            self.opponent_summary[domain_name] = []
 
     def save_data(self):
         """This method is called after the negotiation is finished. It can be used to store data
@@ -206,7 +208,11 @@ class FirstAgent(DefaultParty):
             return
 
         if self.opponent_model:
-            self.opponent_summary["sessions"].append(self.opponent_model.get_summary())
+            domain_name = self.domain.getName()
+            if domain_name not in self.opponent_summary:
+                self.opponent_summary[domain_name] = []
+
+            self.opponent_summary[domain_name].append(self.opponent_model.get_summary())
 
             with open(f"{self.storage_dir}/{self.other}.json", "w") as f:
                 f.write(json.dumps(self.opponent_summary, sort_keys=True, indent=4))
@@ -238,7 +244,7 @@ class FirstAgent(DefaultParty):
 
         if self.opponent_model is not None:
             predicted = self.opponent_model.get_predicted_utility(bid)
-            if utility >= 0.65 and abs(utility - predicted) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
+            if utility >= 0.65 and abs(utility - Decimal(str(predicted))) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
                 return True
         # return all(conditions)
         return utility > dynamic_threshold
