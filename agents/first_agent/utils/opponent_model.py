@@ -68,6 +68,23 @@ class OpponentModel:
             }
         }
 
+    def get_concession_speed(self, window: int = 10) -> float:
+        if len(self.offers) < 2 * window:
+            return 0  # Not enough data to estimate
+
+        # Compute average utility of early and recent bids
+        early_offers = self.offers[:window]
+        recent_offers = self.offers[-window:]
+
+        early_avg = sum(self.get_predicted_utility(bid) for bid in early_offers) / window
+        recent_avg = sum(self.get_predicted_utility(bid) for bid in recent_offers) / window
+
+        # Avoid division by 0
+        if early_avg == 0:
+            return 1
+
+        concession = (early_avg - recent_avg) / early_avg
+        return max(0.0, min(1.0, concession))  # Clamp between 0 and 1
 
 class IssueEstimator:
     def __init__(self, value_set: DiscreteValueSet):

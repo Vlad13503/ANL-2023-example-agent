@@ -37,6 +37,18 @@ from typing import TypedDict
 class SessionData(TypedDict):
     issue_weights: dict[str, float]
     value_counts: dict[str, dict[str, int]]
+    utility_at_finish: float
+
+
+def estimate_alpha_from_past_sessions(sessions: list[SessionData]) -> float:
+    successful_sessions = [s for s in sessions if s["utility_at_finish"] > 0.0]
+    if not successful_sessions:
+        return 0.8  # fallback if previous negotiations always failed
+
+    avg_util = sum(s["utility_at_finish"] for s in successful_sessions) / len(successful_sessions)
+
+    # Tune alpha based on avg utility (such that alpha will be domain specific)
+    return max(0.75, min(0.95, avg_util + 0.1))
 
 
 class FirstAgent(DefaultParty):
@@ -58,6 +70,8 @@ class FirstAgent(DefaultParty):
         self.storage_dir: str = None
         self.opponent_summary: dict[str, list[SessionData]] = None
         self.sorted_bids: list[Bid] = []
+        self.alpha = 0.9 # default acceptance threshold
+        self.utility_at_finish: float = 0.0 # utility of final agreement
 
         self.last_received_bid: Bid = None
         self.opponent_model: OpponentModel = None
@@ -103,6 +117,8 @@ class FirstAgent(DefaultParty):
                 if self.other is None:
                     # obtain the name of the opponent, cutting of the position ID.
                     self.other = str(actor).rsplit("_", 1)[0]
+                    # setting alpha based on domain size if no previous session data available
+                    self.alpha = self.estimate_alpha_from_domain_size()
                     self.load_data()
 
                 # process action done by opponent
@@ -114,6 +130,17 @@ class FirstAgent(DefaultParty):
 
         # Finished will be send if the negotiation has ended (through agreement or deadline)
         elif isinstance(data, Finished):
+            agreements = cast(Finished, data).getAgreements()
+            # Save the utility of the accepted bid
+            if len(agreements.getMap()) > 0:
+                agreed_bid = agreements.getMap()[self.me]
+
+                # Cast profile to LinearAdditiveUtilitySpace to access getUtility()
+                linear_profile = cast(LinearAdditiveUtilitySpace, self.profile)
+                self.utility_at_finish = float(linear_profile.getUtility(agreed_bid))
+            else:
+                self.utility_at_finish = 0 # No bid agreement
+
             self.save_data()
             # terminate the agent MUST BE CALLED
             self.logger.log(logging.INFO, "party is terminating:")
@@ -189,15 +216,17 @@ class FirstAgent(DefaultParty):
 
     def load_data(self):
         filepath = f"{self.storage_dir}/{self.other}.json"
+        domain_name = self.domain.getName()
+
         if path.exists(filepath):
             with open(filepath) as f:
                 self.opponent_summary = json.load(f)
+            if domain_name not in self.opponent_summary:
+                self.opponent_summary[domain_name] = []
+            else: # Calculate alpha based on the utility of the previously accepted bids
+                self.alpha = estimate_alpha_from_past_sessions(self.opponent_summary[domain_name])
         else:
-            self.opponent_summary = {}
-
-        domain_name = self.domain.getName()
-        if domain_name not in self.opponent_summary:
-            self.opponent_summary[domain_name] = []
+            self.opponent_summary = {domain_name: []}
 
     def save_data(self):
         """This method is called after the negotiation is finished. It can be used to store data
@@ -212,7 +241,9 @@ class FirstAgent(DefaultParty):
             if domain_name not in self.opponent_summary:
                 self.opponent_summary[domain_name] = []
 
-            self.opponent_summary[domain_name].append(self.opponent_model.get_summary())
+            session_summary = self.opponent_model.get_summary()
+            session_summary["utility_at_finish"] = self.utility_at_finish
+            self.opponent_summary[domain_name].append(session_summary)
 
             with open(f"{self.storage_dir}/{self.other}.json", "w") as f:
                 f.write(json.dumps(self.opponent_summary, sort_keys=True, indent=4))
@@ -220,6 +251,33 @@ class FirstAgent(DefaultParty):
     ###########################################################################################
     ################################## Example methods below ##################################
     ###########################################################################################
+
+    def estimate_alpha_from_domain_size(self):
+        domain_size = AllBidsList(self.domain).size()
+        if domain_size < 3000:
+            return 0.8  # small domain, be more cooperative
+        elif domain_size < 6000:
+            return 0.85  # medium domain
+        else:
+            return 0.9  # big domain, be conservative since the domain requires more exploration
+
+    def get_dynamic_min_utility(self) -> float:
+        if self.opponent_model and len(self.opponent_model.offers) >= 10:
+            # Enough data to adapt based on opponent
+            predicted_utils = [
+                self.opponent_model.get_predicted_utility(bid)
+                for bid in self.opponent_model.offers
+            ]
+            return max(0.6, min(0.85, sum(predicted_utils) / len(predicted_utils)))
+
+        # If not enough opponent data, base it on domain size
+        domain_size = AllBidsList(self.domain).size()
+        if domain_size < 3000:
+            return 0.6
+        elif domain_size < 6000:
+            return 0.7
+        else:
+            return 0.75
 
     def accept_condition(self, bid: Bid) -> bool:
         if bid is None:
@@ -230,7 +288,7 @@ class FirstAgent(DefaultParty):
         utility = self.profile.getUtility(bid)
 
         # More flexible as time progresses (with cap at 0.4)
-        dynamic_threshold = max(0.9 - 0.8 * (progress ** 4), 0.4)
+        dynamic_threshold = max(self.alpha - 0.6 * (progress ** 4), 0.4)
 
         # very basic approach that accepts if the offer is valued above 0.7 and
         # 95% of the time towards the deadline has passed
@@ -239,32 +297,40 @@ class FirstAgent(DefaultParty):
         #     progress > 0.95,
         # ]
 
-        if utility >= 0.85: # Accept all very good offers
+        if utility >= self.estimate_alpha_from_domain_size(): # Accept all very good offers for a specific domain
             return True
 
         if self.opponent_model is not None:
             predicted = self.opponent_model.get_predicted_utility(bid)
-            if utility >= 0.65 and abs(utility - Decimal(str(predicted))) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
+            if utility >= 0.7 and abs(utility - Decimal(str(predicted))) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
                 return True
         # return all(conditions)
         return utility > dynamic_threshold
 
     def find_bid(self) -> Bid:
+        # Decrease minimum acceptable utility value over time
+        progress = self.progress.get(time() * 1000)
+        if self.opponent_model and self.opponent_model.get_concession_speed() < 0.2:
+            # Opponent is stubborn — delay more the decrease of the threshold
+            min_util = self.get_dynamic_min_utility() - 0.4 * (progress ** 3)
+        else:
+            # Opponent concedes more — decrease faster
+            min_util = self.get_dynamic_min_utility() - 0.8 * (progress ** 3)
+        #min_util = self.get_dynamic_min_utility() - 0.6 * (progress ** 4)
+        opponent_importance = progress ** 2  # Increase opponent influence as time progresses
+
         # compose a list of all possible bids and sort descending on utility
         if not self.sorted_bids:
             all_bids = AllBidsList(self.domain)
             self.sorted_bids = sorted(
                 [all_bids.get(i) for i in range(all_bids.size())],
-                key=lambda crt_bid: self.profile.getUtility(crt_bid),
+                key=lambda crt_bid: self.score_bid(crt_bid, alpha=1 - opponent_importance),
                 reverse=True
             )
 
-        # Decrease minimum acceptable utility value over time
-        progress = self.progress.get(time() * 1000)
-        min_util = 0.7 - 0.6 * (progress ** 4)
-        opponent_importance = progress ** 2  # Increase opponent influence as time progresses
-
-        top_n = max(5, int(len(self.sorted_bids) * 0.01))
+        top_n = 1  # Only pick best bid if the negotiation just started
+        if progress >= 0.2:
+            top_n = max(5, int(len(self.sorted_bids) * 0.01))
 
         top_bids = []
         for bid in self.sorted_bids:
@@ -278,16 +344,32 @@ class FirstAgent(DefaultParty):
             if len(top_bids) >= top_n:
                 break
 
+        if not top_bids:
+            # Fallback: return the best possible bid below min_util
+            for bid in self.sorted_bids:
+                if self.profile.getUtility(bid) < min_util:
+                    return bid
+
         # If we have at least one top-scoring bid, pick one randomly among them
-        if top_bids:
-            return choice([bid for bid, _ in top_bids])
+        selected_bid = choice([bid for bid, _ in top_bids])
+        target_utility = self.profile.getUtility(selected_bid)
 
-        # Fallback: return the best possible bid below min_util
-        for bid in self.sorted_bids:
-            if self.profile.getUtility(bid) < min_util:
-                return bid
+        # Collect all bids with similar utility within epsilon range
+        epsilon = 0.01
+        similar_bids = [
+            bid for bid in self.sorted_bids
+            if abs(self.profile.getUtility(bid) - target_utility) <= epsilon
+        ]
 
-        return self.sorted_bids[-1] # Return worst bid (never reachable)
+        # Choose the one with the highest opponent utility
+        if self.opponent_model and similar_bids:
+            return max(
+                similar_bids,
+                key=lambda b: self.opponent_model.get_predicted_utility(b)
+                #key=lambda b: float(self.profile.getUtility(b)) * self.opponent_model.get_predicted_utility(b) --- using nash score
+            )
+
+        return selected_bid
 
     def score_bid(self, bid: Bid, alpha: float = 0.95, eps: float = 0.1) -> float:
         """Calculate heuristic score for a bid
