@@ -16,12 +16,17 @@ class OpponentModel:
         }
 
     def update(self, bid: Bid):
+        if bid is None: # Skip empty bids
+            return
+
         # keep track of all bids received
         self.offers.append(bid)
 
         # update all issue estimators with the value that is offered for that issue
         for issue_id, issue_estimator in self.issue_estimators.items():
-            issue_estimator.update(bid.getValue(issue_id))
+            value = bid.getValue(issue_id)
+            if value is not None: # Skip invalid values
+                issue_estimator.update(value)
 
     def get_predicted_utility(self, bid: Bid):
         if len(self.offers) == 0 or bid is None:
@@ -63,7 +68,8 @@ class OpponentModel:
             },
             "value_counts": {
                 issue: {
-                    val.getValue(): estimator.value_trackers[val].count for val in estimator.value_trackers
+                    val.getValue(): estimator.value_trackers[val].count
+                    for val in estimator.value_trackers if val is not None
                 } for issue, estimator in self.issue_estimators.items()
             }
         }
