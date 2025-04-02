@@ -288,7 +288,8 @@ class FirstAgent(DefaultParty):
         utility = self.profile.getUtility(bid)
 
         # More flexible as time progresses (with cap at 0.4)
-        dynamic_threshold = max(self.alpha - 0.6 * (progress ** 4), 0.4)
+        # dynamic_threshold = max(self.alpha - 0.6 * (progress ** 4), 0.4)
+        dynamic_threshold = self.alpha / (1 + 5 * (progress ** 3))
 
         # very basic approach that accepts if the offer is valued above 0.7 and
         # 95% of the time towards the deadline has passed
@@ -305,7 +306,7 @@ class FirstAgent(DefaultParty):
             if utility >= 0.7 and abs(utility - Decimal(str(predicted))) <= 0.2: # Accept if the received offer has a decent utility for us and it is favorable for both agents
                 return True
         # return all(conditions)
-        return utility > dynamic_threshold
+        return utility >= dynamic_threshold
 
     def find_bid(self) -> Bid:
         # Decrease minimum acceptable utility value over time
