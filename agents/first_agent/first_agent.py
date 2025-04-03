@@ -287,8 +287,8 @@ class FirstAgent(DefaultParty):
         progress = self.progress.get(time() * 1000)
         utility = self.profile.getUtility(bid)
 
-        # More flexible as time progresses (with cap at 0.4)
-        dynamic_threshold = max(self.alpha - 0.6 * (progress ** 4), 0.4)
+        # More flexible as time progresses (with cap at 0.7)
+        dynamic_threshold = max(self.alpha - 0.6 * (progress ** 4), 0.7)
 
         # very basic approach that accepts if the offer is valued above 0.7 and
         # 95% of the time towards the deadline has passed
@@ -317,7 +317,7 @@ class FirstAgent(DefaultParty):
             # Opponent concedes more — decrease faster
             min_util = self.get_dynamic_min_utility() - 0.8 * (progress ** 3)
         #min_util = self.get_dynamic_min_utility() - 0.6 * (progress ** 4)
-        opponent_importance = progress ** 2  # Increase opponent influence as time progresses
+        opponent_importance = min(progress ** 6, 0.5)  # Increase opponent influence as time progresses up to at most 50%
 
         # compose a list of all possible bids and sort descending on utility
         if not self.sorted_bids:
@@ -329,7 +329,7 @@ class FirstAgent(DefaultParty):
             )
 
         top_n = 1  # Only pick best bid if the negotiation just started
-        if progress >= 0.2:
+        if progress >= 0.1:
             top_n = max(5, int(len(self.sorted_bids) * 0.01))
 
         top_bids = []
@@ -361,15 +361,60 @@ class FirstAgent(DefaultParty):
             if abs(self.profile.getUtility(bid) - target_utility) <= epsilon
         ]
 
-        # Choose the one with the highest opponent utility
+        # Choose the one with the highest opponent utility (combined based on current utility and historical utility)
         if self.opponent_model and similar_bids:
             return max(
                 similar_bids,
-                key=lambda b: self.opponent_model.get_predicted_utility(b)
+                key=lambda b: 0.6 * self.opponent_model.get_predicted_utility(b) + 0.4 * self.get_historical_predicted_utility(b)
                 #key=lambda b: float(self.profile.getUtility(b)) * self.opponent_model.get_predicted_utility(b) --- using nash score
             )
 
         return selected_bid
+
+    def get_historical_predicted_utility(self, bid: Bid) -> float:
+        if not self.opponent_summary:
+            return 0
+
+        domain_name = self.domain.getName()
+        if domain_name not in self.opponent_summary:
+            return 0
+
+        past_sessions = self.opponent_summary[domain_name]
+        if not past_sessions:
+            return 0
+
+        # Average issue_weights and value_counts across previous sessions
+        aggregated_issue_weights = {}
+        aggregated_value_counts = {}
+
+        for session in past_sessions:
+            for issue_id, weight in session["issue_weights"].items():
+                aggregated_issue_weights[issue_id] = aggregated_issue_weights.get(issue_id, 0.0) + weight
+
+            for issue_id, values in session["value_counts"].items():
+                if issue_id not in aggregated_value_counts:
+                    aggregated_value_counts[issue_id] = {}
+                for val, count in values.items():
+                    aggregated_value_counts[issue_id][val] = aggregated_value_counts[issue_id].get(val, 0) + count
+
+        num_sessions = len(past_sessions)
+        avg_issue_weights = {k: v / num_sessions for k, v in aggregated_issue_weights.items()}
+
+        # Compute predicted utility for the opponent bast on historical data
+        predicted_util = 0
+        for issue_id in bid.getIssues():
+            value = bid.getValue(issue_id)
+            if value is None:
+                continue
+
+            value_name = value.getValue()
+            counts = aggregated_value_counts.get(issue_id, {})
+            max_count = max(counts.values(), default=1)
+            value_score = counts.get(value_name, 0) / max_count
+
+            predicted_util += avg_issue_weights.get(issue_id, 0) * value_score
+
+        return predicted_util
 
     def score_bid(self, bid: Bid, alpha: float = 0.95, eps: float = 0.1) -> float:
         """Calculate heuristic score for a bid
